@@ -9,6 +9,8 @@ import (
 	"os"
 	"time"
 
+	credentials "cloud.google.com/go/iam/credentials/apiv1"
+	"cloud.google.com/go/iam/credentials/apiv1/credentialspb"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
@@ -21,32 +23,61 @@ import (
 
 // GCPTokenRetriever implements stscreds.IdentityTokenRetriever
 type GCPTokenRetriever struct {
-	audience string
+	audience            string
+	serviceAccountEmail string // Optional: only needed for local ADC
 }
 
 // GetIdentityToken implements the required interface method
 func (g *GCPTokenRetriever) GetIdentityToken() ([]byte, error) {
 	fmt.Println("Getting new GCP identity token...")
-
-	// Create a context (since our function doesn't accept one)
 	ctx := context.Background()
 
-	// Create a token source for the audience
+	// First try the direct method - this works in GCP with workload identity
+	// and in local environments ADC with service account impersonation
 	tokenSource, err := idtoken.NewTokenSource(ctx, g.audience)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create token source: %w", err)
+	if err == nil {
+		// Direct method worked, use it
+		token, err := tokenSource.Token()
+		if err == nil {
+			fmt.Printf("Retrieved new token via direct method, expires: %s\n", token.Expiry.Format(time.RFC3339))
+			return []byte(token.AccessToken), nil
+		}
+		fmt.Printf("Failed to get token directly: %v\n", err)
+		// Fall through to alternative method if token retrieval failed
 	}
 
-	// Get the token
-	token, err := tokenSource.Token()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get token: %w", err)
+	// If we reach here, direct method didn't work. Check if we have service account email for impersonation
+	if g.serviceAccountEmail == "" {
+		return nil, fmt.Errorf("failed to get token directly and no service account email provided for impersonation")
 	}
 
-	fmt.Printf("Retrieved new token, expires: %s\n", token.Expiry.Format(time.RFC3339))
+	fmt.Println("Using service account impersonation...")
 
-	// Return the token as []byte as required by the interface
-	return []byte(token.AccessToken), nil
+	// Create a client for the IAM Credentials API
+	client, err := credentials.NewIamCredentialsClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create IAM credentials client: %w", err)
+	}
+	defer client.Close()
+
+	// Format the resource name for the service account
+	name := fmt.Sprintf("projects/-/serviceAccounts/%s", g.serviceAccountEmail)
+
+	// Request an ID token with the specified audience
+	req := &credentialspb.GenerateIdTokenRequest{
+		Name:         name,
+		Audience:     g.audience,
+		IncludeEmail: true,
+	}
+
+	resp, err := client.GenerateIdToken(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate ID token: %w", err)
+	}
+
+	fmt.Printf("Retrieved new token via service account impersonation\n")
+
+	return []byte(resp.Token), nil
 }
 
 func main() {
@@ -58,6 +89,7 @@ func main() {
 	recipientPtr := flag.String("recipient", "success@simulator.amazonses.com", "Email recipient address")
 	subjectPtr := flag.String("subject", "Test Email from Amazon SES using Go", "Email subject")
 	sesSourceArnPtr := flag.String("ses-source-arn", "", "SES source ARN e.g. arn:aws:ses:us-west-2:123456789012:identity/example.com")
+	serviceAccountPtr := flag.String("service-account", "", "Optional: Service account email for impersonation when using local ADC")
 	debugPtr := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
@@ -71,11 +103,17 @@ func main() {
 		log.Fatal("Please provide an audience and AWS role ARN and sender address")
 	}
 
+	// Create a token retriever
+	tokenRetriever := &GCPTokenRetriever{
+		audience:            *audiencePtr,
+		serviceAccountEmail: *serviceAccountPtr,
+	}
 	if debug {
-		token, err := getGCPIdentityToken(audience)
+		tokenBytes, err := tokenRetriever.GetIdentityToken()
 		if err != nil {
 			log.Fatalf("Failed to get GCP identity token: %v", err)
 		}
+		token := string(tokenBytes)
 		fmt.Printf("Successfully retrieved identity token: %s...\n", token[:30])
 		az, au, sub, err := decodeAndPrintToken(token)
 		if err != nil {
@@ -84,9 +122,6 @@ func main() {
 		printTrustPolicyInstructions(az, au, sub)
 		os.Exit(0)
 	}
-
-	// Create a token retriever
-	tokenRetriever := &GCPTokenRetriever{audience: *audiencePtr}
 
 	// Create AWS clients with auto-refreshing credentials
 	sesClient, err := createSESClient(*awsRolePtr, *awsRegionPtr, tokenRetriever)
@@ -129,28 +164,6 @@ func createSESClient(roleARN, region string, tokenRetriever stscreds.IdentityTok
 
 	// Create and return SES client
 	return ses.NewFromConfig(cfgWithCreds), nil
-}
-
-// createGCPTokenProvider returns a function that obtains GCP tokens
-func createGCPTokenProvider(audience string) func(context.Context) (string, error) {
-	return func(ctx context.Context) (string, error) {
-		fmt.Println("Getting new GCP identity token...")
-
-		// Create a token source for the audience
-		tokenSource, err := idtoken.NewTokenSource(ctx, audience)
-		if err != nil {
-			return "", fmt.Errorf("failed to create token source: %w", err)
-		}
-
-		// Get the token
-		token, err := tokenSource.Token()
-		if err != nil {
-			return "", fmt.Errorf("failed to get token: %w", err)
-		}
-
-		fmt.Printf("Retrieved new token, expires: %s\n", token.Expiry.Format(time.RFC3339))
-		return token.AccessToken, nil
-	}
 }
 
 // sendEmail sends an email using the provided SES client
@@ -199,26 +212,6 @@ func sendEmail(sesClient *ses.Client, sourceARN, sender, recipient, subject stri
 }
 
 // Function to help prepare AWS IAM Role Trust Policy Configuration
-
-// getGCPIdentityToken retrieves a GCP identity token for the specified audience
-func getGCPIdentityToken(audience string) (string, error) {
-	ctx := context.Background()
-
-	// Create a token source for the audience
-	tokenSource, err := idtoken.NewTokenSource(ctx, audience)
-	if err != nil {
-		return "", fmt.Errorf("failed to create token source: %w", err)
-	}
-
-	// Get the token
-	token, err := tokenSource.Token()
-	if err != nil {
-		return "", fmt.Errorf("failed to get token: %w", err)
-	}
-
-	// For idtoken.NewTokenSource, the token should be in AccessToken
-	return token.AccessToken, nil
-}
 
 // decodeAndPrintToken decodes a JWT token without verification and prints its contents
 func decodeAndPrintToken(tokenString string) (string, string, string, error) {

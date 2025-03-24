@@ -44,4 +44,46 @@ Example policy
 
 #### Usage
 
-For local use instead of using default application credentials, you can set the `GOOGLE_APPLICATION_CREDENTIALS` environment variable to the path of your GCP service account key file.
+Generation of the GCP OIDC ID Token have to be done within service account context.
+
+##### Aplication Default Credentials (ADC)
+
+To support generating [OIDC ID Token](https://cloud.google.com/iam/docs/create-short-lived-credentials-direct#sa-credentials-oidc) with Local Application Default Credentials (ADC) it have to be initialized with [service account impersonation](https://cloud.google.com/docs/authentication/set-up-adc-local-dev-environment#service-account):
+
+```console
+$ gcloud auth application-default login --impersonate-service-account SERVICE_ACCT_EMAIL
+```
+
+and on the target service account following permissions have to be granted:
+
+```console
+$ gcloud iam service-accounts add-iam-policy-binding \
+    SERVICE_ACCT_EMAIL \
+    --member="serviceAccount:SERVICE_ACCT_EMAIL" \
+    --role="roles/iam.serviceAccountTokenCreator"
+
+$ gcloud iam service-accounts add-iam-policy-binding \
+    SERVICE_ACCT_EMAIL \
+    --member="serviceAccount:SERVICE_ACCT_EMAIL" \
+    --role="roles/iam.serviceAccountOpenIDTokenCreator"
+
+$ gcloud iam service-accounts add-iam-policy-binding \
+    SERVICE_ACCT_EMAIL \
+    --member="user:your-user@your-domain.com" \
+    --role="roles/iam.serviceAccountTokenCreator"
+```
+
+##### Accept service account reference
+
+You can use `-service-account` flag of this tool and point to the service account on which you have following permissions granted:
+
+```console
+$ gcloud iam service-accounts add-iam-policy-binding \
+    sa-name@project-name.iam.gserviceaccount.com \
+    --member="user:your-user@your-domain.com" \
+    --role="roles/iam.serviceAccountOpenIdTokenCreator"
+```
+
+##### Service Account Key File
+
+Use `GOOGLE_APPLICATION_CREDENTIALS` environment variable set to the path of the GCP [service account key file](https://cloud.google.com/iam/docs/keys-create-delete).
