@@ -1,0 +1,54 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main    # Trigger on merge to main for production build
+    tags:       # Trigger on tag push for release builds
+      - '*'     # Matches any tag name
+  pull_request:
+    branches:
+      - main    # Run tests on PRs targeting main
+
+jobs:
+  # Job to build on merge to main or tag push
+  build:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    env:
+      REGISTRY: ghcr.io
+      CONTAINER_IMAGE_REPO: ghcr.io/${{ github.repository }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Log in to the Container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set CONTAINER_IMAGE_TAGS based on event
+        id: set_tags
+        run: |
+          if [ "${{ github.event_name }}" == "push" ] && [ "${{ github.ref_type }}" == "tag" ]; then
+            # On tag push, use the tag name and "latest"
+            echo "CONTAINER_IMAGE_TAGS=${{ github.ref_name }},latest" >> $GITHUB_ENV
+          else
+            # On merge to main, set tag as "latest"
+            echo "CONTAINER_IMAGE_TAGS=latest" >> $GITHUB_ENV
+          fi
+
+      - name: Build and publish Docker image
+        run: make build
+        env:
+          CONTAINER_IMAGE_TAGS: ${{ env.CONTAINER_IMAGE_TAGS }}
