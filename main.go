@@ -35,7 +35,9 @@ func (g *GCPTokenRetriever) GetIdentityToken() ([]byte, error) {
 	// First try the direct method - this works in GCP with workload identity
 	// and in local environments ADC with service account impersonation
 	tokenSource, err := idtoken.NewTokenSource(ctx, g.audience)
-	if err == nil {
+	if err != nil {
+		return nil, fmt.Errorf("failed to create token source: %w", err)
+	} else {
 		// Direct method worked, use it
 		token, err := tokenSource.Token()
 		if err == nil {
