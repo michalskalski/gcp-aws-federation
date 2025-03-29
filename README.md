@@ -40,11 +40,35 @@ Example policy
 }
 ```
 
-`-debug` flag can be used to print GCP token details and suggested AWS IAM role trust policy.
+`-show-token` flag can be used to print GCP token details and suggested AWS IAM role trust policy.
 
 #### Usage
 
 Generation of the GCP OIDC ID Token have to be done within service account context.
+
+``` console
+$ gcp-aws-federation -help
+  -audience string
+    	Target audience for the GCP identity token, e.g. https://example.com
+  -log-level string
+    	Log level: debug, info, warn, or error (default "info")
+  -recipient string
+    	Email recipient address (default "success@simulator.amazonses.com")
+  -region string
+    	AWS region for API calls (default "ap-northeast-1")
+  -role string
+    	AWS IAM role ARN to assume, e.g. arn:aws:iam::123456789012:role/ExampleRole
+  -sender string
+    	Email sender address e.g. no-replay@example.com
+  -service-account string
+    	Optional: Service account email for impersonation when using local ADC
+  -ses-source-arn string
+    	SES source ARN e.g. arn:aws:ses:us-west-2:123456789012:identity/example.com
+  -show-token
+    	Show the GCP identity token and exit
+  -subject string
+    	Email subject (default "Test Email from Amazon SES using Go")
+```
 
 ##### Aplication Default Credentials (ADC)
 

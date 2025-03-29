@@ -1,0 +1,35 @@
+# https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ses
+  namespace: test
+  annotations:
+    iam.gke.io/gcp-service-account: ACCOUNT@PROJECT_ID.iam.gserviceaccount.com
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: email-sender
+  namespace: test
+spec:
+  template:
+    spec:
+      serviceAccountName: ses
+      containers:
+      - name: sendmail
+        image: ghcr.io/michalskalski/gcp-aws-federation/sendmail:v0.2.0
+        args:
+          - -role
+          - arn:aws:iam::123456789012:role/ExampleRole
+          - -audience
+          - https//example.com
+          - -sender
+          - no-replay@example.com
+      restartPolicy: Never
+  backoffLimit: 0

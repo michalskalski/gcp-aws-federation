@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	credentials "cloud.google.com/go/iam/credentials/apiv1"
@@ -21,6 +22,14 @@ import (
 	"google.golang.org/api/idtoken"
 )
 
+// Supported log levels
+var logLevels = map[string]slog.Level{
+	"debug": slog.LevelDebug,
+	"info":  slog.LevelInfo,
+	"warn":  slog.LevelWarn,
+	"error": slog.LevelError,
+}
+
 // GCPTokenRetriever implements stscreds.IdentityTokenRetriever
 type GCPTokenRetriever struct {
 	audience            string
@@ -29,31 +38,45 @@ type GCPTokenRetriever struct {
 
 // GetIdentityToken implements the required interface method
 func (g *GCPTokenRetriever) GetIdentityToken() ([]byte, error) {
-	fmt.Println("Getting new GCP identity token...")
 	ctx := context.Background()
 
-	// First try the direct method - this works in GCP with workload identity
-	// and in local environments ADC with service account impersonation
+	// Try direct method first
+	token, err := g.getTokenDirectly(ctx)
+	if err == nil {
+		return token, nil
+	}
+
+	slog.Debug("Direct token retrieval failed, trying impersonation method", slog.Any("error", err))
+
+	token, impersonationErr := g.getTokenViaImpersonation(ctx)
+	if impersonationErr != nil {
+		// Return a combined error that includes both failure methods
+		return nil, fmt.Errorf("identity token retrieval failed: direct method: %w; impersonation method: %w",
+			err, impersonationErr)
+	}
+
+	return token, nil
+}
+
+func (g *GCPTokenRetriever) getTokenDirectly(ctx context.Context) ([]byte, error) {
 	tokenSource, err := idtoken.NewTokenSource(ctx, g.audience)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token source: %w", err)
-	} else {
-		// Direct method worked, use it
-		token, err := tokenSource.Token()
-		if err == nil {
-			fmt.Printf("Retrieved new token via direct method, expires: %s\n", token.Expiry.Format(time.RFC3339))
-			return []byte(token.AccessToken), nil
-		}
-		fmt.Printf("Failed to get token directly: %v\n", err)
-		// Fall through to alternative method if token retrieval failed
 	}
 
-	// If we reach here, direct method didn't work. Check if we have service account email for impersonation
+	token, err := tokenSource.Token()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get token directly: %w", err)
+	}
+
+	slog.Debug("Retrieved token via direct method", slog.String("expires", token.Expiry.Format(time.RFC3339)))
+	return []byte(token.AccessToken), nil
+}
+
+func (g *GCPTokenRetriever) getTokenViaImpersonation(ctx context.Context) ([]byte, error) {
 	if g.serviceAccountEmail == "" {
-		return nil, fmt.Errorf("failed to get token directly and no service account email provided for impersonation")
+		return nil, fmt.Errorf("no service account email provided for impersonation")
 	}
-
-	fmt.Println("Using service account impersonation...")
 
 	// Create a client for the IAM Credentials API
 	client, err := credentials.NewIamCredentialsClient(ctx)
@@ -74,67 +97,32 @@ func (g *GCPTokenRetriever) GetIdentityToken() ([]byte, error) {
 
 	resp, err := client.GenerateIdToken(ctx, req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate ID token: %w", err)
+		return nil, fmt.Errorf("failed to generate ID token via impersonation: %w", err)
 	}
 
-	fmt.Printf("Retrieved new token via service account impersonation\n")
-
+	slog.Debug("Retrieved token via service account impersonation")
 	return []byte(resp.Token), nil
 }
 
-func main() {
-	// Define command-line flags
-	audiencePtr := flag.String("audience", "", "Target audience for the GCP identity token, e.g. https://example.com")
-	awsRolePtr := flag.String("role", "", "AWS IAM role ARN to assume, e.g. arn:aws:iam::123456789012:role/ExampleRole")
-	awsRegionPtr := flag.String("region", "ap-northeast-1", "AWS region for API calls")
-	senderPtr := flag.String("sender", "", "Email sender address e.g. no-replay@example.com")
-	recipientPtr := flag.String("recipient", "success@simulator.amazonses.com", "Email recipient address")
-	subjectPtr := flag.String("subject", "Test Email from Amazon SES using Go", "Email subject")
-	sesSourceArnPtr := flag.String("ses-source-arn", "", "SES source ARN e.g. arn:aws:ses:us-west-2:123456789012:identity/example.com")
-	serviceAccountPtr := flag.String("service-account", "", "Optional: Service account email for impersonation when using local ADC")
-	debugPtr := flag.Bool("debug", false, "Enable debug logging")
-	flag.Parse()
-
-	// Get values from flags
-	audience := *audiencePtr
-	awsRole := *awsRolePtr
-	//	awsRegion := *awsRegionPtr
-	debug := *debugPtr
-
-	if audience == "" || awsRole == "" || *senderPtr == "" {
-		log.Fatal("Please provide an audience and AWS role ARN and sender address")
+// setupLogger configures the global slog logger with the specified log level
+func setupLogger(levelStr string) error {
+	level, ok := logLevels[levelStr]
+	if !ok {
+		// Default to info if an invalid level is provided
+		level = slog.LevelInfo
+		slog.Warn("Invalid log level specified, defaulting to 'info'", "specified", levelStr)
 	}
 
-	// Create a token retriever
-	tokenRetriever := &GCPTokenRetriever{
-		audience:            *audiencePtr,
-		serviceAccountEmail: *serviceAccountPtr,
-	}
-	if debug {
-		tokenBytes, err := tokenRetriever.GetIdentityToken()
-		if err != nil {
-			log.Fatalf("Failed to get GCP identity token: %v", err)
-		}
-		token := string(tokenBytes)
-		fmt.Printf("Successfully retrieved identity token: %s...\n", token[:30])
-		az, au, sub, err := decodeAndPrintToken(token)
-		if err != nil {
-			fmt.Printf("Failed to decode token: %v\n", err)
-		}
-		printTrustPolicyInstructions(az, au, sub)
-		os.Exit(0)
-	}
+	// Create a JSON handler with the specified level
+	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: level,
+		// Add any other handler options you need here
+	})
 
-	// Create AWS clients with auto-refreshing credentials
-	sesClient, err := createSESClient(*awsRolePtr, *awsRegionPtr, tokenRetriever)
-	if err != nil {
-		log.Fatalf("Failed to create SES client: %v", err)
-	}
+	// Set the default logger
+	slog.SetDefault(slog.New(handler))
 
-	// Send email using SES
-	fmt.Println("Sending email via SES...")
-	sendEmail(sesClient, *sesSourceArnPtr, *senderPtr, *recipientPtr, *subjectPtr)
-
+	return nil
 }
 
 // createSESClient creates an SES client with auto-refreshing credentials
@@ -206,11 +194,11 @@ func sendEmail(sesClient *ses.Client, sourceARN, sender, recipient, subject stri
 	// Send the email
 	result, err := sesClient.SendEmail(ctx, input)
 	if err != nil {
-		fmt.Printf("Failed to send email: %v\n", err)
+		slog.Error("Failed to send email", slog.Any("error", err))
 		return
 	}
 
-	fmt.Printf("\nEmail sent successfully! Message ID: %s\n", *result.MessageId)
+	slog.Info("Email sent successfully", slog.String("message_id", *result.MessageId))
 }
 
 // Function to help prepare AWS IAM Role Trust Policy Configuration
@@ -293,4 +281,68 @@ func printTrustPolicyInstructions(authorizedParty, audience, subject string) {
 
 	fmt.Println(trustPolicy)
 	fmt.Println("=============================================")
+}
+
+func main() {
+	// Define command-line flags
+	audiencePtr := flag.String("audience", "", "Target audience for the GCP identity token, e.g. https://example.com")
+	awsRolePtr := flag.String("role", "", "AWS IAM role ARN to assume, e.g. arn:aws:iam::123456789012:role/ExampleRole")
+	awsRegionPtr := flag.String("region", "ap-northeast-1", "AWS region for API calls")
+	senderPtr := flag.String("sender", "", "Email sender address e.g. no-replay@example.com")
+	recipientPtr := flag.String("recipient", "success@simulator.amazonses.com", "Email recipient address")
+	subjectPtr := flag.String("subject", "Test Email from Amazon SES using Go", "Email subject")
+	sesSourceArnPtr := flag.String("ses-source-arn", "", "SES source ARN e.g. arn:aws:ses:us-west-2:123456789012:identity/example.com")
+	serviceAccountPtr := flag.String("service-account", "", "Optional: Service account email for impersonation when using local ADC")
+	logLevelPtr := flag.String("log-level", "info", "Log level: debug, info, warn, or error")
+	showTokenPtr := flag.Bool("show-token", false, "Show the GCP identity token and exit")
+	flag.Parse()
+
+	// Get values from flags
+	normalizedLogLevel := strings.ToLower(strings.TrimSpace(*logLevelPtr))
+	audience := *audiencePtr
+	awsRole := *awsRolePtr
+	//	awsRegion := *awsRegionPtr
+	showToken := *showTokenPtr
+
+	// Set up slog
+	if err := setupLogger(normalizedLogLevel); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to set up logger: %v\n", err)
+		os.Exit(1)
+	}
+
+	if audience == "" || awsRole == "" || *senderPtr == "" {
+		slog.Error("Please provide an audience, AWS role ARN, and sender address")
+		os.Exit(1)
+	}
+
+	// Create a token retriever
+	tokenRetriever := &GCPTokenRetriever{
+		audience:            *audiencePtr,
+		serviceAccountEmail: *serviceAccountPtr,
+	}
+	if showToken {
+		tokenBytes, err := tokenRetriever.GetIdentityToken()
+		if err != nil {
+			slog.Error("Failed to get GCP identity token", slog.Any("error", err))
+			os.Exit(1)
+		}
+		token := string(tokenBytes)
+		az, au, sub, err := decodeAndPrintToken(token)
+		if err != nil {
+			slog.Error("Failed to decode token", slog.Any("error", err))
+			os.Exit(1)
+		}
+		printTrustPolicyInstructions(az, au, sub)
+		os.Exit(0)
+	}
+
+	// Create AWS clients with auto-refreshing credentials
+	sesClient, err := createSESClient(*awsRolePtr, *awsRegionPtr, tokenRetriever)
+	if err != nil {
+		slog.Error("Failed to create SES client", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	// Send email using SES
+	sendEmail(sesClient, *sesSourceArnPtr, *senderPtr, *recipientPtr, *subjectPtr)
 }
