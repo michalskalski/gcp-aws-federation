@@ -15,8 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
-	"github.com/aws/aws-sdk-go-v2/service/ses"
-	"github.com/aws/aws-sdk-go-v2/service/ses/types"
+	"github.com/aws/aws-sdk-go-v2/service/sesv2"
+	"github.com/aws/aws-sdk-go-v2/service/sesv2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/golang-jwt/jwt/v4"
 	"google.golang.org/api/idtoken"
@@ -126,7 +126,7 @@ func setupLogger(levelStr string) error {
 }
 
 // createSESClient creates an SES client with auto-refreshing credentials
-func createSESClient(roleARN, region string, tokenRetriever stscreds.IdentityTokenRetriever) (*ses.Client, error) {
+func createSESClient(roleARN, region string, tokenRetriever stscreds.IdentityTokenRetriever) (*sesv2.Client, error) {
 	ctx := context.Background()
 
 	// Load base AWS config with region
@@ -153,42 +153,46 @@ func createSESClient(roleARN, region string, tokenRetriever stscreds.IdentityTok
 	}
 
 	// Create and return SES client
-	return ses.NewFromConfig(cfgWithCreds), nil
+	return sesv2.NewFromConfig(cfgWithCreds), nil
 }
 
 // sendEmail sends an email using the provided SES client
-func sendEmail(sesClient *ses.Client, sourceARN, sender, recipient, subject string) {
+func sendEmail(sesClient *sesv2.Client, sourceARN, sender, recipient, subject string) {
 	ctx := context.Background()
 
 	htmlBody := "<h1>Amazon SES Test Email</h1><p>This email was sent using <strong>Amazon SES</strong> and the AWS SDK for Go.</p>"
 	textBody := "Amazon SES Test Email\nThis email was sent using Amazon SES and the AWS SDK for Go."
 
 	// Create email input
-	input := &ses.SendEmailInput{
-		Source: aws.String(sender),
+	input := &sesv2.SendEmailInput{
+		FromEmailAddress: &sender,
 		Destination: &types.Destination{
 			ToAddresses: []string{recipient},
 		},
-		Message: &types.Message{
-			Subject: &types.Content{
-				Data:    aws.String(subject),
-				Charset: aws.String("UTF-8"),
-			},
-			Body: &types.Body{
-				Html: &types.Content{
-					Data:    aws.String(htmlBody),
+		Content: &types.EmailContent{
+			Simple: &types.Message{
+				Body: &types.Body{
+					Html: &types.Content{
+						Data:    aws.String(htmlBody),
+						Charset: aws.String("UTF-8"),
+					},
+					Text: &types.Content{
+						Data:    aws.String(textBody),
+						Charset: aws.String("UTF-8"),
+					},
+				},
+				Subject: &types.Content{
+					Data:    aws.String(subject),
 					Charset: aws.String("UTF-8"),
 				},
-				Text: &types.Content{
-					Data:    aws.String(textBody),
-					Charset: aws.String("UTF-8"),
-				},
+				// Optional headers
+				Headers: []types.MessageHeader{},
 			},
 		},
 	}
 
 	if sourceARN != "" {
-		input.SourceArn = aws.String(sourceARN)
+		input.FromEmailAddressIdentityArn = aws.String(sourceARN)
 	}
 
 	// Send the email
