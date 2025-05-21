@@ -2,13 +2,13 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches:
-      - main    # Trigger on merge to main for production build
-    tags:       # Trigger on tag push for release builds
-      - '*'     # Matches any tag name
+   # branches:
+   #   - main    # Trigger on merge to main for production build
+   # tags:       # Trigger on tag push for release builds
+   #   - '*'     # Matches any tag name
   pull_request:
-    branches:
-      - main    # Run tests on PRs targeting main
+   # branches:
+   #   - main    # Run tests on PRs targeting main
 
 jobs:
   # Job to build on merge to main or tag push
@@ -52,3 +52,13 @@ jobs:
         run: make build
         env:
           CONTAINER_IMAGE_TAGS: ${{ env.CONTAINER_IMAGE_TAGS }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          # Name of the artifact to upload.
+          # Optional. Default is 'artifact'
+          name: test-artifact
+
+          # A file, directory or wildcard pattern that describes what to upload
+          # Required.
+          path: bin/

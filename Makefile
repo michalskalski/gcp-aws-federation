@@ -15,7 +15,7 @@ $(KO):
 # Build and publish the container image with ko
 .PHONY: build
 build: $(KO)
-	KO_DEFAULTBASEIMAGE=$(BASEIMAGE) KO_DOCKER_REPO="$(CONTAINER_IMAGE_REPO)/$(CONTAINER_IMAGE_PREFIX)sendmail" $(KO) build $(KO_FLAGS) --tags $(CONTAINER_IMAGE_TAGS) --bare
+	go build -o $(BIN_DIR)/sendmail .
 
 .PHONY: clean
 clean:
